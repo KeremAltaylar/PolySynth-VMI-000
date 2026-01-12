@@ -54,6 +54,7 @@ export default function SynthUI() {
   const reverbRef = useRef(null);
   const delayRef = useRef(null);
   const distortionRef = useRef(null);
+  const compressorRef = useRef(null);
   const fftRef = useRef(null);
   const p5InstanceRef = useRef(null);
   const voicesRef = useRef(new Map());
@@ -107,16 +108,24 @@ export default function SynthUI() {
         distortionRef.current = new p5.Distortion();
         delayRef.current = new p5.Delay();
         reverbRef.current = new p5.Reverb();
+        compressorRef.current = new p5.Compressor();
 
-        p.masterVolume(0.7);
+        p.masterVolume(0.6);
 
         delayRef.current.process(distortionRef.current, delayTime, delayFeedback, delayFilter);
         reverbRef.current.process(delayRef.current, reverbTime, reverbDecay);
-        reverbRef.current.amp(0.9);
+        reverbRef.current.amp(0.85);
         reverbRef.current.drywet(reverbDryWet);
 
+        compressorRef.current.threshold(-12);
+        compressorRef.current.ratio(4);
+        compressorRef.current.attack(0.003);
+        compressorRef.current.release(0.25);
+        compressorRef.current.knee(20);
+        compressorRef.current.process(reverbRef.current, 1.0);
+
         fftRef.current = new p5.FFT();
-        fftRef.current.setInput(reverbRef.current);
+        fftRef.current.setInput(compressorRef.current);
       };
 
       p.draw = () => {
@@ -163,6 +172,7 @@ export default function SynthUI() {
       if (reverbRef.current && typeof reverbRef.current.dispose === 'function') reverbRef.current.dispose();
       if (delayRef.current && typeof delayRef.current.dispose === 'function') delayRef.current.dispose();
       if (distortionRef.current && typeof distortionRef.current.dispose === 'function') distortionRef.current.dispose();
+      if (compressorRef.current && typeof compressorRef.current.dispose === 'function') compressorRef.current.dispose();
       if (fftRef.current && typeof fftRef.current.dispose === 'function') fftRef.current.dispose();
 
       voicesRef.current.forEach((voice) => {
@@ -182,10 +192,14 @@ export default function SynthUI() {
   // Effect for ADSR updates
   useEffect(() => {
     if (audioStarted) {
+      const safeAttack = Math.max(attack, 0.02);
+      const baseRange = 0.35;
+      const size = Math.max(voicesRef.current.size, 1);
+      const targetRange = baseRange / Math.sqrt(size);
       voicesRef.current.forEach((voice) => {
         if (voice.env) {
-          voice.env.setADSR(attack, decay, sustain, release);
-          voice.env.setRange(0.4, 0);
+          voice.env.setADSR(safeAttack, decay, sustain, release);
+          voice.env.setRange(targetRange, 0);
         }
       });
     }
@@ -231,6 +245,17 @@ export default function SynthUI() {
     }
   }, [reverbTime, reverbDecay, reverbDryWet, audioStarted]);
 
+  function updateVoiceRanges() {
+    const baseRange = 0.35;
+    const size = Math.max(voicesRef.current.size, 1);
+    const targetRange = baseRange / Math.sqrt(size);
+    voicesRef.current.forEach((voice) => {
+      if (voice.env) {
+        voice.env.setRange(targetRange, 0);
+      }
+    });
+  }
+
   function startVoice(id, freq) {
     if (!audioStarted) return;
     if (voicesRef.current.size >= MAX_VOICES) {
@@ -239,8 +264,9 @@ export default function SynthUI() {
     }
     const osc = new p5.Oscillator(oscillatorType);
     const env = new p5.Envelope();
-    env.setADSR(attack, decay, sustain, release);
-    env.setRange(0.4, 0);
+    const safeAttack = Math.max(attack, 0.02);
+    env.setADSR(safeAttack, decay, sustain, release);
+    env.setRange(0.35, 0);
     osc.freq(freq);
     osc.amp(env);
     osc.start();
@@ -251,6 +277,7 @@ export default function SynthUI() {
     }
     voicesRef.current.set(id, { osc, env });
     env.triggerAttack(osc);
+    updateVoiceRanges();
   }
 
   function stopVoice(id) {
@@ -263,6 +290,7 @@ export default function SynthUI() {
       osc.stop();
       osc.disconnect();
       voicesRef.current.delete(id);
+      updateVoiceRanges();
     }, releaseTime * 1000 + 20);
   }
 
