@@ -51,12 +51,17 @@ export default function SynthUI() {
   };
 
   const canvasRef = useRef(null);
+  
+  // Audio Chain Refs
+  const mainBusRef = useRef(null);
   const reverbRef = useRef(null);
   const delayRef = useRef(null);
   const distortionRef = useRef(null);
   const compressorRef = useRef(null);
   const fftRef = useRef(null);
   const p5InstanceRef = useRef(null);
+  
+  // Voice Management
   const voicesRef = useRef(new Map());
   const voiceTimersRef = useRef(new Map());
 
@@ -68,6 +73,9 @@ export default function SynthUI() {
   const [decay, setDecay] = useState(0.1);
   const [sustain, setSustain] = useState(0.2); // Default sustain level (0 to 1)
   const [release, setRelease] = useState(0.15);
+
+  // Ref to hold current ADSR for stale closures (like window blur cleanup)
+  const adsrRef = useRef({ attack, decay, sustain, release });
 
   // Oscillator
   const [oscillatorType, setOscillatorType] = useState("sine");
@@ -94,10 +102,9 @@ export default function SynthUI() {
 
   // Audio Start
   const [audioStarted, setAudioStarted] = useState(false);
-  // Gate Mode state removed
   const MAX_VOICES = 12;
 
-  // p5.js sketch effect
+  // p5.js sketch effect (Audio Engine Initialization)
   useEffect(() => {
     if (!audioStarted) return;
 
@@ -106,30 +113,62 @@ export default function SynthUI() {
         p.createCanvas(1200, 300).parent(canvasRef.current);
         p.background(30);
 
+        // 1. Initialize Audio Nodes
+        mainBusRef.current = new p5.Gain(); // Main bus for all voices
+        mainBusRef.current.connect(); // Ensure it connects to audio context
+
         distortionRef.current = new p5.Distortion();
         delayRef.current = new p5.Delay();
         reverbRef.current = new p5.Reverb();
         compressorRef.current = new p5.Compressor();
+        
+        // 2. Configure Chain Routing: Bus -> Distortion -> Delay -> Reverb -> Compressor -> Master
+        
+        // Disconnect default connections to ensure strict routing
+        mainBusRef.current.disconnect();
+        distortionRef.current.disconnect();
+        delayRef.current.disconnect();
+        reverbRef.current.disconnect();
+        compressorRef.current.disconnect();
 
-        p.masterVolume(0.6);
+        // Establish the chain
+        mainBusRef.current.connect(distortionRef.current);
+        distortionRef.current.connect(delayRef.current);
+        delayRef.current.connect(reverbRef.current);
+        reverbRef.current.connect(compressorRef.current);
+        compressorRef.current.connect(p.soundOut); // Connect to master output
+        
+        // 3. Set Initial Parameter Values
+        p.masterVolume(0.5); // Safety headroom
 
-        delayRef.current.process(distortionRef.current, delayTime, delayFeedback, delayFilter);
-        reverbRef.current.process(delayRef.current, reverbTime, reverbDecay);
-        reverbRef.current.amp(0.85);
-        reverbRef.current.drywet(reverbDryWet);
-
+        // Distortion
         distortionRef.current.set(distortionAmount, "2x");
         distortionRef.current.drywet(distortionDryWet);
 
+        // Delay
+        // p5.Delay process() is weird, it usually connects input to it. 
+        // In our chain, distortion connects to delay. 
+        // We just need to set parameters.
+        delayRef.current.delayTime(delayTime || 0.001); // avoid 0 delay issues
+        delayRef.current.feedback(delayFeedback);
+        delayRef.current.filter(delayFilter);
+
+        // Reverb
+        reverbRef.current.set(reverbTime, reverbDecay);
+        reverbRef.current.drywet(reverbDryWet);
+        reverbRef.current.amp(1.0); // Maintain volume
+
+        // Compressor (Limiter protection)
         compressorRef.current.threshold(-12);
-        compressorRef.current.ratio(4);
+        compressorRef.current.ratio(12); // Higher ratio for limiting
         compressorRef.current.attack(0.003);
         compressorRef.current.release(0.25);
-        compressorRef.current.knee(20);
-        compressorRef.current.process(reverbRef.current, 1.0);
-
+        compressorRef.current.knee(10);
+        
+        // 4. Setup Visualization
         fftRef.current = new p5.FFT();
-        // Analyze master output so visualization is always active
+        // We want to visualize the final output
+        fftRef.current.setInput(compressorRef.current); 
       };
 
       p.draw = () => {
@@ -173,11 +212,13 @@ export default function SynthUI() {
     const myp5 = new p5(sketch);
 
     return () => {
+      // Cleanup
       if (reverbRef.current && typeof reverbRef.current.dispose === 'function') reverbRef.current.dispose();
       if (delayRef.current && typeof delayRef.current.dispose === 'function') delayRef.current.dispose();
       if (distortionRef.current && typeof distortionRef.current.dispose === 'function') distortionRef.current.dispose();
       if (compressorRef.current && typeof compressorRef.current.dispose === 'function') compressorRef.current.dispose();
       if (fftRef.current && typeof fftRef.current.dispose === 'function') fftRef.current.dispose();
+      if (mainBusRef.current && typeof mainBusRef.current.dispose === 'function') mainBusRef.current.dispose();
 
       voicesRef.current.forEach((voice) => {
         if (voice.osc) {
@@ -193,12 +234,18 @@ export default function SynthUI() {
       p5InstanceRef.current = null;
     };
     // Re-run effect only when audioStarted changes
-  }, [audioStarted]); // Removed gateMode from dependencies
+  }, [audioStarted]); // Removed dependencies that should only trigger parameter updates
 
-  // Effect for ADSR updates
+  // === Parameter Update Effects ===
+  // These effects update the already existing audio nodes without re-creating the sketch
+
+  // ADSR Updates
   useEffect(() => {
+    // Update Ref
+    adsrRef.current = { attack, decay, sustain, release };
+    
     if (audioStarted) {
-      const safeAttack = Math.max(attack, 0.02);
+      const safeAttack = Math.max(attack, 0.005); // Min attack 5ms enforced
       const baseRange = 0.35;
       const size = Math.max(voicesRef.current.size, 1);
       const targetRange = baseRange / Math.sqrt(size);
@@ -211,16 +258,16 @@ export default function SynthUI() {
     }
   }, [attack, decay, sustain, release, audioStarted]);
 
-  // Effect for Delay updates
+  // Delay Updates
   useEffect(() => {
     if (delayRef.current && audioStarted) {
-      delayRef.current.delayTime(delayTime);
+      delayRef.current.delayTime(delayTime || 0.001);
       delayRef.current.feedback(delayFeedback);
       delayRef.current.filter(delayFilter);
     }
   }, [delayTime, delayFeedback, delayFilter, audioStarted]);
 
-  // Effect for Reverb updates
+  // Reverb Updates
   useEffect(() => {
     if (reverbRef.current && audioStarted) {
       reverbRef.current.set(reverbTime, reverbDecay);
@@ -228,7 +275,7 @@ export default function SynthUI() {
     }
   }, [reverbTime, reverbDecay, reverbDryWet, audioStarted]);
 
-  // Effect for Distortion updates
+  // Distortion Updates
   useEffect(() => {
     if (distortionRef.current && audioStarted) {
        distortionRef.current.set(distortionAmount, "2x");
@@ -236,20 +283,6 @@ export default function SynthUI() {
     }
   }, [distortionAmount, distortionDryWet, audioStarted]);
 
-  useEffect(() => {
-    if (delayRef.current && audioStarted) {
-      delayRef.current.delayTime(delayTime);
-      delayRef.current.feedback(delayFeedback);
-      delayRef.current.filter(delayFilter);
-    }
-  }, [delayTime, delayFeedback, delayFilter, audioStarted]);
-
-  useEffect(() => {
-    if (reverbRef.current && audioStarted) {
-      reverbRef.current.set(reverbTime, reverbDecay);
-      reverbRef.current.drywet(reverbDryWet);
-    }
-  }, [reverbTime, reverbDecay, reverbDryWet, audioStarted]);
 
   function updateVoiceRanges() {
     const baseRange = 0.35;
@@ -283,27 +316,51 @@ export default function SynthUI() {
   }, []);
 
   function startVoice(id, freq) {
-    if (!audioStarted) return;
+    if (!audioStarted || !mainBusRef.current) return;
+    
+    // Voice Stealing
     if (voicesRef.current.size >= MAX_VOICES) {
       const oldestId = voicesRef.current.keys().next().value;
       stopVoice(oldestId);
     }
+
+    // Create Voice
     const osc = new p5.Oscillator(oscillatorType);
     const env = new p5.Envelope();
-    const safeAttack = Math.max(attack, 0.02);
+    
+    // Safety Attack: Enforce minimum 5ms attack to prevent clicks
+    const safeAttack = Math.max(attack, 0.005);
+    
     env.setADSR(safeAttack, decay, sustain, release);
-    env.setRange(0.35, 0);
+    env.setRange(0.35, 0); // Initial range, updated later
+    
     osc.freq(freq);
-    osc.amp(env);
+    osc.amp(env); // Modulate amplitude with envelope
+    
+    // Critical Routing Step:
+    // 1. Start Oscillator (silent because env is 0)
     osc.start();
-    osc.amp(0);
-    if (distortionRef.current) {
-      distortionRef.current.process(osc);
-    }
+    
+    // 2. Disconnect from default master output
+    osc.disconnect();
+    
+    // 3. Connect to Main Bus (which feeds the FX chain)
+    osc.connect(mainBusRef.current);
+
     voicesRef.current.set(id, { osc, env });
-    env.triggerAttack(osc, 0.005); // small delay to reduce initial click
+    
+    // 4. Trigger Attack
+    // Adding a tiny delay (5ms) ensures the oscillator graph is stable before amplitude rises
+    // This eliminates the "DC offset click" on first note
+    setTimeout(() => {
+        if(voicesRef.current.has(id)) {
+            env.triggerAttack(osc); 
+        }
+    }, 5);
+
     updateVoiceRanges();
-    // Auto-release safeguard to avoid stuck notes
+    
+    // Auto-release safeguard
     const MAX_NOTE_MS = 12000;
     const timer = setTimeout(() => {
       if (voicesRef.current.has(id)) {
@@ -317,19 +374,25 @@ export default function SynthUI() {
     const voice = voicesRef.current.get(id);
     if (!voice) return;
     const { osc, env } = voice;
+    
     env.triggerRelease(osc);
-    const releaseTime = Math.max(release, 0.05);
+    
+    // Use Ref for release time to ensure we use the latest value even in stale closures
+    const currentRelease = adsrRef.current.release;
+    const releaseTime = Math.max(currentRelease, 0.05);
+    // Cleanup after release
     setTimeout(() => {
       osc.stop();
       osc.disconnect();
       voicesRef.current.delete(id);
       updateVoiceRanges();
+      
       const timer = voiceTimersRef.current.get(id);
       if (timer) {
         clearTimeout(timer);
         voiceTimersRef.current.delete(id);
       }
-    }, releaseTime * 1000 + 20);
+    }, releaseTime * 1000 + 100); // Extra buffer
   }
 
   useEffect(() => {
