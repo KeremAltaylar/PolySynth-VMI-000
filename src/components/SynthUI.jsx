@@ -58,6 +58,7 @@ export default function SynthUI() {
   const fftRef = useRef(null);
   const p5InstanceRef = useRef(null);
   const voicesRef = useRef(new Map());
+  const voiceTimersRef = useRef(new Map());
 
   const pressedKeysRef = useRef(new Set());
   const midiHeldNotesRef = useRef(new Set());
@@ -117,6 +118,9 @@ export default function SynthUI() {
         reverbRef.current.amp(0.85);
         reverbRef.current.drywet(reverbDryWet);
 
+        distortionRef.current.set(distortionAmount, "2x");
+        distortionRef.current.drywet(distortionDryWet);
+
         compressorRef.current.threshold(-12);
         compressorRef.current.ratio(4);
         compressorRef.current.attack(0.003);
@@ -125,7 +129,7 @@ export default function SynthUI() {
         compressorRef.current.process(reverbRef.current, 1.0);
 
         fftRef.current = new p5.FFT();
-        fftRef.current.setInput(compressorRef.current);
+        // Analyze master output so visualization is always active
       };
 
       p.draw = () => {
@@ -182,6 +186,8 @@ export default function SynthUI() {
         }
       });
       voicesRef.current.clear();
+      voiceTimersRef.current.forEach((t) => clearTimeout(t));
+      voiceTimersRef.current.clear();
 
       myp5.remove(); // Clean up the p5 sketch
       p5InstanceRef.current = null;
@@ -256,6 +262,26 @@ export default function SynthUI() {
     });
   }
 
+  function stopAllVoices() {
+    const ids = Array.from(voicesRef.current.keys());
+    ids.forEach((id) => stopVoice(id));
+    pressedKeysRef.current.clear();
+    midiHeldNotesRef.current.clear();
+  }
+
+  useEffect(() => {
+    const onBlur = () => stopAllVoices();
+    const onVisibility = () => {
+      if (document.hidden) stopAllVoices();
+    };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
   function startVoice(id, freq) {
     if (!audioStarted) return;
     if (voicesRef.current.size >= MAX_VOICES) {
@@ -272,12 +298,19 @@ export default function SynthUI() {
     osc.start();
     osc.amp(0);
     if (distortionRef.current) {
-      distortionRef.current.process(osc, distortionAmount, "none");
-      distortionRef.current.drywet(distortionDryWet);
+      distortionRef.current.process(osc);
     }
     voicesRef.current.set(id, { osc, env });
-    env.triggerAttack(osc);
+    env.triggerAttack(osc, 0.005); // small delay to reduce initial click
     updateVoiceRanges();
+    // Auto-release safeguard to avoid stuck notes
+    const MAX_NOTE_MS = 12000;
+    const timer = setTimeout(() => {
+      if (voicesRef.current.has(id)) {
+        stopVoice(id);
+      }
+    }, MAX_NOTE_MS);
+    voiceTimersRef.current.set(id, timer);
   }
 
   function stopVoice(id) {
@@ -291,6 +324,11 @@ export default function SynthUI() {
       osc.disconnect();
       voicesRef.current.delete(id);
       updateVoiceRanges();
+      const timer = voiceTimersRef.current.get(id);
+      if (timer) {
+        clearTimeout(timer);
+        voiceTimersRef.current.delete(id);
+      }
     }, releaseTime * 1000 + 20);
   }
 
