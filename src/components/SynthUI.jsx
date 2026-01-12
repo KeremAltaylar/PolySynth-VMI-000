@@ -51,13 +51,12 @@ export default function SynthUI() {
   };
 
   const canvasRef = useRef(null);
-  const oscRef = useRef(null);
-  const envRef = useRef(null);
   const reverbRef = useRef(null);
   const delayRef = useRef(null);
   const distortionRef = useRef(null);
   const fftRef = useRef(null);
-  const p5InstanceRef = useRef(null); // To store p5 instance for cleanup
+  const p5InstanceRef = useRef(null);
+  const voicesRef = useRef(new Map());
 
   const pressedKeysRef = useRef(new Set());
   const midiHeldNotesRef = useRef(new Set());
@@ -94,6 +93,7 @@ export default function SynthUI() {
   // Audio Start
   const [audioStarted, setAudioStarted] = useState(false);
   // Gate Mode state removed
+  const MAX_VOICES = 12;
 
   // p5.js sketch effect
   useEffect(() => {
@@ -102,37 +102,20 @@ export default function SynthUI() {
     const sketch = (p) => {
       p.setup = () => {
         p.createCanvas(1200, 300).parent(canvasRef.current);
-        p.background(30); // Initial background draw
-
-        envRef.current = new p5.Envelope();
-        envRef.current.setADSR(attack, decay, sustain, release);
-        envRef.current.setRange(0.5, 0);
-
-        oscRef.current = new p5.Oscillator(oscillatorType);
-        oscRef.current.amp(envRef.current);
-        oscRef.current.start();
-        oscRef.current.amp(0);
+        p.background(30);
 
         distortionRef.current = new p5.Distortion();
-        distortionRef.current.process(oscRef.current, distortionAmount, 'none');
-        distortionRef.current.drywet(distortionDryWet);
-
         delayRef.current = new p5.Delay();
-        delayRef.current.process(distortionRef.current, delayTime, delayFeedback, delayFilter);
-        delayRef.current.process(oscRef.current, delayTime, delayFeedback, delayFilter);
-
-
         reverbRef.current = new p5.Reverb();
+
+        p.masterVolume(0.7);
+
+        delayRef.current.process(distortionRef.current, delayTime, delayFeedback, delayFilter);
         reverbRef.current.process(delayRef.current, reverbTime, reverbDecay);
-        reverbRef.current.process(distortionRef.current, reverbTime, reverbDecay);
-        reverbRef.current.process(oscRef.current, reverbTime, reverbDecay);
-        reverbRef.current.amp(2);
+        reverbRef.current.amp(0.9);
         reverbRef.current.drywet(reverbDryWet);
 
         fftRef.current = new p5.FFT();
-        fftRef.current.setInput(oscRef.current);
-        fftRef.current.setInput(distortionRef.current);
-        fftRef.current.setInput(delayRef.current);
         fftRef.current.setInput(reverbRef.current);
       };
 
@@ -177,15 +160,18 @@ export default function SynthUI() {
     const myp5 = new p5(sketch);
 
     return () => {
-      if (oscRef.current) {
-        oscRef.current.stop();
-        oscRef.current.disconnect();
-      }
-      if (envRef.current && typeof envRef.current.dispose === 'function') envRef.current.dispose();
       if (reverbRef.current && typeof reverbRef.current.dispose === 'function') reverbRef.current.dispose();
       if (delayRef.current && typeof delayRef.current.dispose === 'function') delayRef.current.dispose();
       if (distortionRef.current && typeof distortionRef.current.dispose === 'function') distortionRef.current.dispose();
       if (fftRef.current && typeof fftRef.current.dispose === 'function') fftRef.current.dispose();
+
+      voicesRef.current.forEach((voice) => {
+        if (voice.osc) {
+          voice.osc.stop();
+          voice.osc.disconnect();
+        }
+      });
+      voicesRef.current.clear();
 
       myp5.remove(); // Clean up the p5 sketch
       p5InstanceRef.current = null;
@@ -193,18 +179,15 @@ export default function SynthUI() {
     // Re-run effect only when audioStarted changes
   }, [audioStarted]); // Removed gateMode from dependencies
 
-  // Effect for updating oscillator type
-  useEffect(() => {
-    if (audioStarted && oscRef.current && oscRef.current.setType) {
-      oscRef.current.setType(oscillatorType);
-    }
-  }, [oscillatorType, audioStarted]);
-
   // Effect for ADSR updates
   useEffect(() => {
-    if (envRef.current && audioStarted) {
-      envRef.current.setADSR(attack, decay, sustain, release);
-      envRef.current.setRange(0.5, 0); // Ensure range is set consistently
+    if (audioStarted) {
+      voicesRef.current.forEach((voice) => {
+        if (voice.env) {
+          voice.env.setADSR(attack, decay, sustain, release);
+          voice.env.setRange(0.4, 0);
+        }
+      });
     }
   }, [attack, decay, sustain, release, audioStarted]);
 
@@ -233,52 +216,92 @@ export default function SynthUI() {
     }
   }, [distortionAmount, distortionDryWet, audioStarted]);
 
+  useEffect(() => {
+    if (delayRef.current && audioStarted) {
+      delayRef.current.delayTime(delayTime);
+      delayRef.current.feedback(delayFeedback);
+      delayRef.current.filter(delayFilter);
+    }
+  }, [delayTime, delayFeedback, delayFilter, audioStarted]);
+
+  useEffect(() => {
+    if (reverbRef.current && audioStarted) {
+      reverbRef.current.set(reverbTime, reverbDecay);
+      reverbRef.current.drywet(reverbDryWet);
+    }
+  }, [reverbTime, reverbDecay, reverbDryWet, audioStarted]);
+
+  function startVoice(id, freq) {
+    if (!audioStarted) return;
+    if (voicesRef.current.size >= MAX_VOICES) {
+      const oldestId = voicesRef.current.keys().next().value;
+      stopVoice(oldestId);
+    }
+    const osc = new p5.Oscillator(oscillatorType);
+    const env = new p5.Envelope();
+    env.setADSR(attack, decay, sustain, release);
+    env.setRange(0.4, 0);
+    osc.freq(freq);
+    osc.amp(env);
+    osc.start();
+    osc.amp(0);
+    if (distortionRef.current) {
+      distortionRef.current.process(osc, distortionAmount, "none");
+      distortionRef.current.drywet(distortionDryWet);
+    }
+    voicesRef.current.set(id, { osc, env });
+    env.triggerAttack(osc);
+  }
+
+  function stopVoice(id) {
+    const voice = voicesRef.current.get(id);
+    if (!voice) return;
+    const { osc, env } = voice;
+    env.triggerRelease(osc);
+    const releaseTime = Math.max(release, 0.05);
+    setTimeout(() => {
+      osc.stop();
+      osc.disconnect();
+      voicesRef.current.delete(id);
+    }, releaseTime * 1000 + 20);
+  }
+
+  useEffect(() => {
+    if (!audioStarted) return;
+    voicesRef.current.forEach((voice) => {
+      if (voice.osc && voice.osc.setType) {
+        voice.osc.setType(oscillatorType);
+      }
+    });
+  }, [oscillatorType, audioStarted]);
 
   // Keyboard event listeners
   useEffect(() => {
     if (!audioStarted) return;
 
     const handleKeyDown = (e) => {
-      if (!oscRef.current || !envRef.current) return;
-      if (pressedKeysRef.current.has(e.key.toLowerCase())) return;
-
+      const key = e.key.toLowerCase();
+      if (pressedKeysRef.current.has(key)) return;
 
       const keyInfo = getKeyInfo(e.key);
       if (!keyInfo) return;
 
-       // Use the selected scale ratios
       const scaleRatios = scales[selectedScale];
       if (!scaleRatios || keyInfo.index >= scaleRatios.length) {
         console.warn("Invalid scale index or scale data missing.");
         return;
       }
 
-      pressedKeysRef.current.add(e.key.toLowerCase());
-      // Calculate frequency based on selected scale
+      pressedKeysRef.current.add(key);
       const freq = currentRootFreq * scaleRatios[keyInfo.index] * Math.pow(2, (octave + keyInfo.octaveShift) - 4);
-
-      // Simplified logic: always trigger attack on key down
-      oscRef.current.freq(freq); // Set frequency immediately
-      envRef.current.triggerAttack(oscRef.current); // Trigger envelope attack
-
-
+      startVoice(`kbd-${key}`, freq);
     };
 
     const handleKeyUp = (e) => {
-      if (!oscRef.current || !envRef.current || !pressedKeysRef.current.has(e.key.toLowerCase())) return;
-
-      pressedKeysRef.current.delete(e.key.toLowerCase());
-
-      // Simplified logic: trigger release only when NO keys are held
-      if (pressedKeysRef.current.size === 0) {
-          envRef.current.triggerRelease(oscRef.current);
-      }
-      // Note: In this simplified mode, quickly pressing and releasing multiple keys might
-      // not re-trigger the envelope for subsequent held keys. The envelope is only
-      // triggered ONCE on the *first* key down and released ONCE on the *last* key up.
-      // If you want each key press/release to manage its own voice/envelope, you'd
-      // need a polyphonic synth or more complex monophonic voice management.
-      // Sticking to the simplified monophonic trigger pattern as implied by removing gate mode.
+      const key = e.key.toLowerCase();
+      if (!pressedKeysRef.current.has(key)) return;
+      pressedKeysRef.current.delete(key);
+      stopVoice(`kbd-${key}`);
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -288,7 +311,7 @@ export default function SynthUI() {
       window.removeEventListener("keyup", handleKeyUp);
     };
      // Update dependencies
-  }, [audioStarted, octave, selectedScale, currentRootFreq, envRef, oscRef, attack, sustain, release]);
+  }, [audioStarted, octave, selectedScale, currentRootFreq, attack, decay, sustain, release, oscillatorType]);
 
 
   // MIDI event listener
@@ -302,28 +325,18 @@ export default function SynthUI() {
     let midiAccessInstance = null;
 
     const onMIDIMessage = (event) => {
-      if (!oscRef.current || !envRef.current) return;
-
       const [status, note, velocity] = event.data;
       const command = status & 0xf0;
       // MIDI uses standard chromatic scale. Scale selection only applies to keyboard.
       const freq = 440 * Math.pow(2, (note - 69) / 12);
 
       if (command === 0x90 && velocity > 0) {
+        if (midiHeldNotesRef.current.has(note)) return;
         midiHeldNotesRef.current.add(note);
-
-        // Simplified logic: always trigger attack on MIDI note on
-        oscRef.current.freq(freq); // Set frequency immediately
-        envRef.current.triggerAttack(oscRef.current); // Trigger envelope attack
-
+        startVoice(`midi-${note}`, freq);
       } else if (command === 0x80 || (command === 0x90 && velocity === 0)) {
         midiHeldNotesRef.current.delete(note);
-
-        // Simplified logic: trigger release only when NO MIDI notes are held
-        if (midiHeldNotesRef.current.size === 0) {
-          envRef.current.triggerRelease(oscRef.current);
-        }
-         // Similar note as keyboard: monophonic triggering means release only on last note off.
+        stopVoice(`midi-${note}`);
       }
     };
 
@@ -352,7 +365,7 @@ export default function SynthUI() {
       }
     };
      // Update dependencies
-  }, [audioStarted, envRef, oscRef, attack, sustain, release]); // Removed gateMode from dependencies
+  }, [audioStarted, attack, decay, sustain, release, oscillatorType]); // Removed gateMode from dependencies
 
   const startAudioContext = async () => {
     try {
